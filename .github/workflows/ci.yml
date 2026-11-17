@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        go: ['1.27']
+        include:
+          # Oldest supported release, to catch use of newer stdlib APIs.
+          - os: ubuntu-latest
+            go: '1.27'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test with race detector
+        run: go test -race -count=1 ./...
+
+      - name: Test coverage
+        if: matrix.os == 'ubuntu-latest'
+        run: go test -cover -count=1 ./...
+
+  fuzz:
+    # Short smoke run. The fuzz targets keep their invariants on every seed
+    # corpus in CI; the longer hunt is a local `go test -fuzz` with a real time
+    # budget. Ramped up because the OpenSearch body parser is the only place in
+    # this library that consumes attacker-controlled bytes.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+
+      - name: Fuzz TranslateResponse
+        run: go test -run=XXX -fuzz=FuzzTranslateResponse -fuzztime=60s ./opensearch/...
+
+      - name: Fuzz Registry.Resolve
+        run: go test -run=XXX -fuzz=FuzzRegistryResolve -fuzztime=30s ./opensearch/...
+
+  staticcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+
+      - name: staticcheck
+        uses: dominikh/staticcheck-action@v1
+        with:
+          version: latest
+
+  gosec:
+    # Fuzzing and vet do not look for credential handling or integer issues in
+    # the same way. This library's whole job is "do not leak", so a security
+    # linter is worth the CI minute.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+
+      - name: gosec
+        uses: securego/gosec@master
+        with:
+          args: -quiet ./...
+
+  govulncheck:
+    # Checks the dependency graph against the Go vulnerability database. The
+    # drivers this library wraps are transitive dependencies of most users, so
+    # a known CVE in one of them reaches the user's binary through here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
